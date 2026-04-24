@@ -361,6 +361,7 @@ type renamePlan struct {
 
 func applyTransforms(name string, opts options, number int) string {
 	out := name
+	// Transform order is user-visible: flags run left-to-right as passed on the CLI.
 	for _, step := range opts.transforms {
 		switch step.kind {
 		case transformRegex:
@@ -443,6 +444,8 @@ func buildNumberedPlans(paths []string, opts options, numbering *numberingState)
 	seenTargets := make(map[string]struct{})
 
 	for _, oldPath := range paths {
+		// Numbered runs are preflighted as a batch so we either reserve a full safe plan
+		// up front or leave the numbering state untouched.
 		plan, changed, err := planRename(oldPath, opts, next)
 		if err != nil {
 			return nil, skipped, err
@@ -535,6 +538,7 @@ func collectPaths(args []string, recursive bool) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
+			// Reverse post-order so children are planned before parents.
 			for i := len(current) - 1; i >= 0; i-- {
 				paths = append(paths, current[i])
 			}
@@ -694,6 +698,7 @@ func validateEditedPlans(plans []renamePlan) ([]renamePlan, int, error) {
 			return nil, skipped, formatError("target exists: %s", plan.newPath)
 		}
 		seenTargets[plan.newPath] = struct{}{}
+		// Only targets that will actually move away are safe to reuse in the edited plan.
 		if _, plannedSource := movingOldPaths[plan.newPath]; plannedSource {
 			out = append(out, plan)
 			continue
@@ -847,6 +852,7 @@ func executeRenamePlans(plans []renamePlan, opts options) (summary, error) {
 		progressed := false
 		nextPending := pending[:0]
 		for _, plan := range pending {
+			// A rename can proceed once no other pending item still occupies its destination.
 			if _, blocked := currentPaths[plan.finalPath]; blocked {
 				nextPending = append(nextPending, plan)
 				continue
@@ -864,6 +870,8 @@ func executeRenamePlans(plans []renamePlan, opts options) (summary, error) {
 			continue
 		}
 
+		// No destination is currently free, so we have a cycle such as a<->b.
+		// Break it by moving one element to a temporary sibling path first.
 		cycle := pending[0]
 		tmpPath, err := tempRenamePath(filepath.Dir(cycle.currentPath), filepath.Base(cycle.finalPath))
 		if err != nil {
@@ -998,6 +1006,7 @@ func collectTransforms(args []string) ([]transformStep, *numberingOptions, error
 		}
 	}
 
+	// Parsing transforms separately from the flag package lets us preserve CLI order.
 	return transforms, numbering, nil
 }
 
@@ -1059,6 +1068,7 @@ func readSection(expr string, start int, delim rune) (string, int, error) {
 		if ch == '\\' && i+1 < len(expr) {
 			next := rune(expr[i+1])
 			if next == delim {
+				// Support sed-style escaped delimiters without interpreting other escapes.
 				section.WriteRune(delim)
 				i++
 				continue
@@ -1263,6 +1273,8 @@ func targetPathConflicts(oldPath string, oldInfo fs.FileInfo, newPath string) (b
 	oldBase := filepath.Base(oldPath)
 	newBase := filepath.Base(newPath)
 	if oldDir == newDir && strings.EqualFold(oldBase, newBase) && os.SameFile(oldInfo, newInfo) {
+		// On case-insensitive filesystems "Foo" -> "foo" resolves to the same file.
+		// Allow that, but only when the directory does not contain both spellings.
 		hasBoth, err := dirHasDistinctEntries(oldDir, oldBase, newBase)
 		if err != nil {
 			return false, err
@@ -1340,6 +1352,7 @@ func normalizeArgs(args []string) ([]string, error) {
 		for _, r := range runes {
 			switch {
 			case strings.ContainsRune(shortBooleanFlags, r):
+				// Expand bundled booleans like -lru into -l -r -u.
 				normalized = append(normalized, "-"+string(r))
 			case strings.ContainsRune(shortValueFlags, r):
 				return nil, fmt.Errorf("invalid bundled short flag %q in %q", "-"+string(r), arg)
