@@ -32,6 +32,47 @@ func numberingStep(width, next int, separator string) transformStep {
 	}
 }
 
+func requireCaseSensitiveTempDir(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	probeDir := filepath.Join(dir, ".casecheck")
+	upper := filepath.Join(probeDir, "CASECHECK")
+	lower := filepath.Join(probeDir, "casecheck")
+	if err := os.Mkdir(probeDir, 0o755); err != nil {
+		t.Fatalf("Mkdir probe: %v", err)
+	}
+	if err := os.WriteFile(upper, []byte("upper"), 0o644); err != nil {
+		t.Fatalf("WriteFile upper: %v", err)
+	}
+	if err := os.WriteFile(lower, []byte("lower"), 0o644); err != nil {
+		// These tests need both spellings to exist as separate entries; otherwise
+		// they exercise the case-only rename path instead of the conflict path.
+		t.Skipf("temp filesystem does not support distinct case-only names: %v", err)
+	}
+	entries, err := os.ReadDir(probeDir)
+	if err != nil {
+		t.Fatalf("ReadDir probe: %v", err)
+	}
+	foundUpper := false
+	foundLower := false
+	for _, entry := range entries {
+		switch entry.Name() {
+		case "CASECHECK":
+			foundUpper = true
+		case "casecheck":
+			foundLower = true
+		}
+	}
+	if !foundUpper || !foundLower {
+		t.Skip("temp filesystem does not support distinct case-only names")
+	}
+	if err := os.RemoveAll(probeDir); err != nil {
+		t.Fatalf("RemoveAll probe: %v", err)
+	}
+	return dir
+}
+
 func TestParseExpressionApply(t *testing.T) {
 	t.Parallel()
 
@@ -497,7 +538,7 @@ func TestRecursivePlanRenamesChildrenBeforeParents(t *testing.T) {
 func TestRenamePathRejectsExistingTarget(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
+	dir := requireCaseSensitiveTempDir(t)
 	oldPath := filepath.Join(dir, "Foo")
 	newPath := filepath.Join(dir, "foo")
 
@@ -849,7 +890,7 @@ func TestValidateRenamePlansRejectsExistingUnmovedTarget(t *testing.T) {
 func TestTargetPathConflictsTreatsHardLinkAsConflict(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
+	dir := requireCaseSensitiveTempDir(t)
 	oldPath := filepath.Join(dir, "Foo")
 	hardLinkPath := filepath.Join(dir, "foo")
 	if err := os.WriteFile(oldPath, []byte("x"), 0o644); err != nil {
@@ -1039,7 +1080,7 @@ func TestCLIRejectsDuplicateNumberPrefixFlags(t *testing.T) {
 func TestCLIConflictingRecursivePlanChangesNothing(t *testing.T) {
 	t.Parallel()
 
-	root := t.TempDir()
+	root := requireCaseSensitiveTempDir(t)
 	if err := os.WriteFile(filepath.Join(root, "Foo"), []byte("old"), 0o644); err != nil {
 		t.Fatalf("WriteFile Foo: %v", err)
 	}
@@ -1180,7 +1221,7 @@ func TestCLIRecursiveFilesOnlyLeavesDirectoriesAlone(t *testing.T) {
 func TestCollectRenamePlansFailsBeforeStarting(t *testing.T) {
 	t.Parallel()
 
-	root := t.TempDir()
+	root := requireCaseSensitiveTempDir(t)
 	if err := os.WriteFile(filepath.Join(root, "Foo"), []byte("old"), 0o644); err != nil {
 		t.Fatalf("WriteFile old: %v", err)
 	}
