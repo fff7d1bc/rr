@@ -1,19 +1,20 @@
 APP := rr
-STATIC_APP := $(APP)-static
 BUILD_DIR := $(CURDIR)/build
-BIN_ROOT_DIR := $(BUILD_DIR)/bin
-HOST_BIN_DIR := $(BIN_ROOT_DIR)/host
-HOST_BIN := $(HOST_BIN_DIR)/$(APP)
-STATIC_BIN := $(HOST_BIN_DIR)/$(STATIC_APP)
-GOCACHE := $(BUILD_DIR)/gocache
-GOMODCACHE := $(BUILD_DIR)/gomodcache
-GOPATH := $(BUILD_DIR)/gopath
-GOTMPDIR := $(BUILD_DIR)/tmp
-GOTELEMETRYDIR := $(BUILD_DIR)/telemetry
-GOENV := off
-GOFLAGS := -modcacherw
 GOOS ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)
+PLATFORM := $(GOOS)-$(GOARCH)
+PLATFORM_BUILD_DIR := $(BUILD_DIR)/$(PLATFORM)
+BIN_DIR := $(PLATFORM_BUILD_DIR)/bin
+BIN := $(BIN_DIR)/$(APP)
+STATIC_BIN := $(BIN_DIR)/$(APP)-static
+GO_SOURCES := $(wildcard *.go)
+GOCACHE := $(PLATFORM_BUILD_DIR)/gocache
+GOMODCACHE := $(PLATFORM_BUILD_DIR)/gomodcache
+GOPATH := $(PLATFORM_BUILD_DIR)/gopath
+GOTMPDIR := $(PLATFORM_BUILD_DIR)/tmp
+GOTELEMETRYDIR := $(PLATFORM_BUILD_DIR)/telemetry
+GOENV := off
+GOFLAGS := -modcacherw
 
 export GOCACHE
 export GOMODCACHE
@@ -28,31 +29,33 @@ export GOTELEMETRY=off
 
 all: build
 
-build: $(HOST_BIN)
-
-test: go.mod main.go main_test.go
-	mkdir -p "$(GOCACHE)" "$(GOMODCACHE)" "$(GOPATH)" "$(GOTMPDIR)" "$(GOTELEMETRYDIR)"
-	go test ./...
+build: $(BIN)
 
 static: $(STATIC_BIN)
 
-$(HOST_BIN): go.mod main.go
-	mkdir -p "$(HOST_BIN_DIR)" "$(GOCACHE)" "$(GOMODCACHE)" "$(GOPATH)" "$(GOTMPDIR)" "$(GOTELEMETRYDIR)"
-	go build -o "$(HOST_BIN)" .
+test:
+	mkdir -p "$(GOCACHE)" "$(GOMODCACHE)" "$(GOPATH)" "$(GOTMPDIR)" "$(GOTELEMETRYDIR)"
+	go test ./...
 
-$(STATIC_BIN): go.mod main.go
-	mkdir -p "$(HOST_BIN_DIR)" "$(GOCACHE)" "$(GOMODCACHE)" "$(GOPATH)" "$(GOTMPDIR)" "$(GOTELEMETRYDIR)"
-	CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(STATIC_BIN)" .
+$(BIN): go.mod $(GO_SOURCES)
+	mkdir -p "$(BIN_DIR)" "$(GOCACHE)" "$(GOMODCACHE)" "$(GOPATH)" "$(GOTMPDIR)" "$(GOTELEMETRYDIR)"
+	go build -trimpath -o "$(BIN)" .
+
+$(STATIC_BIN): go.mod $(GO_SOURCES)
+	mkdir -p "$(BIN_DIR)" "$(GOCACHE)" "$(GOMODCACHE)" "$(GOPATH)" "$(GOTMPDIR)" "$(GOTELEMETRYDIR)"
+	CGO_ENABLED=0 go build -trimpath -tags "netgo osusergo" -ldflags "-s -w -buildid=" -o "$(STATIC_BIN)" .
+	@echo "static binary: $(STATIC_BIN)"
 
 run: build
-	"$(HOST_BIN)"
+	"$(BIN)" $(ARGS)
 
 install: build
 	if [ "$$(id -u)" -eq 0 ]; then \
-		install -m 0755 "$(HOST_BIN)" "/usr/local/bin/$(APP)"; \
+		mkdir -p /usr/local/bin; \
+		install -m 0755 "$(BIN)" "/usr/local/bin/$(APP)"; \
 	else \
 		mkdir -p "$$HOME/.local/bin"; \
-		ln -sfn "$(HOST_BIN)" "$$HOME/.local/bin/$(APP)"; \
+		install -m 0755 "$(BIN)" "$$HOME/.local/bin/$(APP)"; \
 	fi
 
 clean:

@@ -50,11 +50,12 @@ Build and install:
 
 ```sh
 make build
+make static
 make install
 ```
 
 Binary:
 
 ```sh
-./build/bin/host/rr
+./build/$(go env GOOS)-$(go env GOARCH)/bin/rr
 ```
