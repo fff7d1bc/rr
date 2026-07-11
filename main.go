@@ -1061,8 +1061,24 @@ func collectTransforms(args []string) ([]transformStep, *numberingOptions, error
 		switch {
 		case arg == "-l" || arg == "--lower":
 			transforms = append(transforms, transformStep{kind: transformLower})
+		case strings.HasPrefix(arg, "-l=") || strings.HasPrefix(arg, "--lower="):
+			enabled, err := strconv.ParseBool(strings.SplitN(arg, "=", 2)[1])
+			if err != nil {
+				return nil, nil, fmt.Errorf("invalid lower value in %q: %w", arg, err)
+			}
+			if enabled {
+				transforms = append(transforms, transformStep{kind: transformLower})
+			}
 		case arg == "-u" || arg == "--underscores":
 			transforms = append(transforms, transformStep{kind: transformUnderscores})
+		case strings.HasPrefix(arg, "-u=") || strings.HasPrefix(arg, "--underscores="):
+			enabled, err := strconv.ParseBool(strings.SplitN(arg, "=", 2)[1])
+			if err != nil {
+				return nil, nil, fmt.Errorf("invalid underscores value in %q: %w", arg, err)
+			}
+			if enabled {
+				transforms = append(transforms, transformStep{kind: transformUnderscores})
+			}
 		case arg == "-e" || arg == "--sub":
 			if i+1 >= len(args) {
 				return nil, nil, errors.New("missing value for --sub")

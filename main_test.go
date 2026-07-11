@@ -185,6 +185,12 @@ func TestNormalizeArgs(t *testing.T) {
 			ok:   true,
 		},
 		{
+			name: "short boolean value allowed",
+			args: []string{"-l=true", "-u=false"},
+			want: []string{"-l=true", "-u=false"},
+			ok:   true,
+		},
+		{
 			name: "interactive long flag allowed",
 			args: []string{"--interactive"},
 			want: []string{"--interactive"},
@@ -409,6 +415,40 @@ func TestCollectTransformsRespectsOrder(t *testing.T) {
 	}
 	if got := applyTransforms("abyss file.txt", optsSecond, 0); got != "Abyss file.txt" {
 		t.Fatalf("applyTransforms second = %q", got)
+	}
+}
+
+func TestCollectTransformsHonorsExplicitBooleanValues(t *testing.T) {
+	t.Parallel()
+
+	steps, _, err := collectTransforms([]string{
+		"--lower=false",
+		"--underscores=true",
+		"-l=true",
+		"-u=false",
+	})
+	if err != nil {
+		t.Fatalf("collectTransforms: %v", err)
+	}
+	if len(steps) != 2 || steps[0].kind != transformUnderscores || steps[1].kind != transformLower {
+		t.Fatalf("collectTransforms steps = %+v", steps)
+	}
+}
+
+func TestCLIExplicitBooleanTransformValue(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "README")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	out, err := runCLI(t, "--dry-run", "--lower=true", "--underscores=false", target)
+	if err != nil {
+		t.Fatalf("runCLI: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, target+" -> "+filepath.Join(dir, "readme")) {
+		t.Fatalf("explicit boolean output = %s", out)
 	}
 }
 
