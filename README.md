@@ -14,11 +14,12 @@ Important behavior:
 - `rr` builds the full rename plan first and checks for conflicts before changing anything
 - targets are never overwritten, including targets created after the plan was checked
 - if applying a batch fails, completed renames are rolled back when possible; abrupt process or system termination can still leave a partially applied batch
+- transforms and interactive edits change only basenames; `rr` does not move an item to another directory
 - transform flags run in the order you pass them
 - short boolean flags can be bundled, for example `-lru`
 - long flags must use `--long-form`
 - `-n`, `--dry-run` shows the plan without changing files
-- `-i`, `--interactive` opens `$EDITOR`, lets you edit the plan, then asks whether to apply it
+- `-i`, `--interactive` opens `$EDITOR`, lets you edit target basenames without changing their directories, then asks whether to apply the plan
 - recursive numbering is rejected; for numbered renames, pass the items directly instead of `-r`, for example `rr -N 001_ somedir/*.png`
 - numbered prefixes use the shape you pass: `-N 001_` means width `3`, start `1`, separator `_`
 - case-insensitive filesystems are handled, including case-only renames like `Foo` -> `foo`

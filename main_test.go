@@ -47,47 +47,6 @@ func runRenamePaths(paths []string, opts options) (summary, error) {
 	return total, err
 }
 
-func requireCaseSensitiveTempDir(t *testing.T) string {
-	t.Helper()
-
-	dir := t.TempDir()
-	probeDir := filepath.Join(dir, ".casecheck")
-	upper := filepath.Join(probeDir, "CASECHECK")
-	lower := filepath.Join(probeDir, "casecheck")
-	if err := os.Mkdir(probeDir, 0o755); err != nil {
-		t.Fatalf("Mkdir probe: %v", err)
-	}
-	if err := os.WriteFile(upper, []byte("upper"), 0o644); err != nil {
-		t.Fatalf("WriteFile upper: %v", err)
-	}
-	if err := os.WriteFile(lower, []byte("lower"), 0o644); err != nil {
-		// These tests need both spellings to exist as separate entries; otherwise
-		// they exercise the case-only rename path instead of the conflict path.
-		t.Skipf("temp filesystem does not support distinct case-only names: %v", err)
-	}
-	entries, err := os.ReadDir(probeDir)
-	if err != nil {
-		t.Fatalf("ReadDir probe: %v", err)
-	}
-	foundUpper := false
-	foundLower := false
-	for _, entry := range entries {
-		switch entry.Name() {
-		case "CASECHECK":
-			foundUpper = true
-		case "casecheck":
-			foundLower = true
-		}
-	}
-	if !foundUpper || !foundLower {
-		t.Skip("temp filesystem does not support distinct case-only names")
-	}
-	if err := os.RemoveAll(probeDir); err != nil {
-		t.Fatalf("RemoveAll probe: %v", err)
-	}
-	return dir
-}
-
 func TestParseExpressionApply(t *testing.T) {
 	t.Parallel()
 
@@ -553,9 +512,9 @@ func TestRecursivePlanRenamesChildrenBeforeParents(t *testing.T) {
 func TestExecuteRenamePlansRejectsExistingTarget(t *testing.T) {
 	t.Parallel()
 
-	dir := requireCaseSensitiveTempDir(t)
+	dir := t.TempDir()
 	oldPath := filepath.Join(dir, "Foo")
-	newPath := filepath.Join(dir, "foo")
+	newPath := filepath.Join(dir, "target")
 
 	if err := os.WriteFile(oldPath, []byte("old"), 0o644); err != nil {
 		t.Fatalf("WriteFile old: %v", err)
@@ -564,7 +523,11 @@ func TestExecuteRenamePlansRejectsExistingTarget(t *testing.T) {
 		t.Fatalf("WriteFile new: %v", err)
 	}
 
-	result, err := runRenamePaths([]string{oldPath}, options{transforms: []transformStep{lowerStep()}})
+	r, err := parseExpression(`s/^Foo$/target/`)
+	if err != nil {
+		t.Fatalf("parseExpression: %v", err)
+	}
+	result, err := runRenamePaths([]string{oldPath}, options{transforms: []transformStep{{kind: transformRegex, replacer: r}}})
 	if err == nil {
 		t.Fatal("runRenamePaths succeeded, want error")
 	}
@@ -752,9 +715,18 @@ func TestBuildNumberedPlansSkipsUnchangedWithoutAdvancing(t *testing.T) {
 func TestValidateEditedPlansAllowsSwapTargets(t *testing.T) {
 	t.Parallel()
 
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a")
+	b := filepath.Join(dir, "b")
+	if err := os.WriteFile(a, []byte("A"), 0o644); err != nil {
+		t.Fatalf("WriteFile a: %v", err)
+	}
+	if err := os.WriteFile(b, []byte("B"), 0o644); err != nil {
+		t.Fatalf("WriteFile b: %v", err)
+	}
 	plans, skipped, err := validateEditedPlans([]renamePlan{
-		{oldPath: "/tmp/a", newPath: "/tmp/b"},
-		{oldPath: "/tmp/b", newPath: "/tmp/a"},
+		{oldPath: a, newPath: b},
+		{oldPath: b, newPath: a},
 	})
 	if err != nil {
 		t.Fatalf("validateEditedPlans: %v", err)
@@ -1050,9 +1022,9 @@ func TestValidateRenamePlansRejectsExistingUnmovedTarget(t *testing.T) {
 func TestTargetPathConflictsTreatsHardLinkAsConflict(t *testing.T) {
 	t.Parallel()
 
-	dir := requireCaseSensitiveTempDir(t)
-	oldPath := filepath.Join(dir, "Foo")
-	hardLinkPath := filepath.Join(dir, "foo")
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "source")
+	hardLinkPath := filepath.Join(dir, "hard-link")
 	if err := os.WriteFile(oldPath, []byte("x"), 0o644); err != nil {
 		t.Fatalf("WriteFile old: %v", err)
 	}
@@ -1113,6 +1085,158 @@ func TestValidateRenamePlansRejectsDuplicateSources(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "duplicate source path") {
 		t.Fatalf("validateRenamePlans error = %v", err)
+	}
+}
+
+func TestValidateRenamePlansRejectsSourceAliases(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	intermediate := filepath.Join(dir, "intermediate")
+	if err := os.Mkdir(intermediate, 0o755); err != nil {
+		t.Fatalf("Mkdir intermediate: %v", err)
+	}
+	source := filepath.Join(dir, "Foo Name")
+	if err := os.WriteFile(source, []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+	alias := filepath.Join(intermediate, "..", "Foo Name")
+	err := validateRenamePlans([]renamePlan{
+		{oldPath: source, newPath: filepath.Join(dir, "first")},
+		{oldPath: alias, newPath: filepath.Join(dir, "second")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "duplicate source path") {
+		t.Fatalf("validateRenamePlans error = %v, want duplicate source", err)
+	}
+}
+
+func TestValidateRenamePlansRejectsSymlinkedParentAlias(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	realDir := filepath.Join(dir, "real")
+	linkDir := filepath.Join(dir, "link")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatalf("Mkdir real: %v", err)
+	}
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Skipf("filesystem does not support directory symlinks: %v", err)
+	}
+	source := filepath.Join(realDir, "source")
+	if err := os.WriteFile(source, []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+	err := validateRenamePlans([]renamePlan{
+		{oldPath: source, newPath: filepath.Join(realDir, "first")},
+		{oldPath: filepath.Join(linkDir, "source"), newPath: filepath.Join(linkDir, "second")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "duplicate source path") {
+		t.Fatalf("validateRenamePlans error = %v, want duplicate source", err)
+	}
+}
+
+func TestValidateRenamePlansKeepsDistinctHardLinksDistinct(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first")
+	second := filepath.Join(dir, "second")
+	if err := os.WriteFile(first, []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile first: %v", err)
+	}
+	if err := os.Link(first, second); err != nil {
+		t.Skipf("filesystem does not support hard links: %v", err)
+	}
+	if err := validateRenamePlans([]renamePlan{
+		{oldPath: first, newPath: filepath.Join(dir, "first-new")},
+		{oldPath: second, newPath: filepath.Join(dir, "second-new")},
+	}); err != nil {
+		t.Fatalf("validateRenamePlans rejected distinct hard links: %v", err)
+	}
+}
+
+func TestCollectRenamePlansRejectsPathSeparatorBeforeMutation(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	first := filepath.Join(dir, "A")
+	second := filepath.Join(dir, "B")
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, []byte(filepath.Base(path)), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q): %v", path, err)
+		}
+	}
+	toLower, err := parseExpression(`s/^A$/a/`)
+	if err != nil {
+		t.Fatalf("parse first expression: %v", err)
+	}
+	toMissingDir, err := parseExpression(`s#^B$#missing/B#`)
+	if err != nil {
+		t.Fatalf("parse second expression: %v", err)
+	}
+	_, _, err = collectRenamePlans([]string{first, second}, options{transforms: []transformStep{
+		{kind: transformRegex, replacer: toLower},
+		{kind: transformRegex, replacer: toMissingDir},
+	}}, nil)
+	if err == nil || !strings.Contains(err.Error(), "path separator") {
+		t.Fatalf("collectRenamePlans error = %v, want path separator", err)
+	}
+	for _, path := range []string{first, second} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("source changed after invalid plan: %v", statErr)
+		}
+	}
+}
+
+func TestValidateEditedPlansRejectsDirectoryChange(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	other := filepath.Join(dir, "other")
+	if err := os.Mkdir(other, 0o755); err != nil {
+		t.Fatalf("Mkdir other: %v", err)
+	}
+	source := filepath.Join(dir, "source")
+	if err := os.WriteFile(source, []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+	_, _, err := validateEditedPlans([]renamePlan{{oldPath: source, newPath: filepath.Join(other, "target")}})
+	if err == nil || !strings.Contains(err.Error(), "target must remain in source directory") {
+		t.Fatalf("validateEditedPlans error = %v", err)
+	}
+}
+
+func TestExecuteRenamePlansPerformsCaseOnlyRename(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "Foo")
+	newPath := filepath.Join(dir, "foo")
+	if err := os.WriteFile(oldPath, []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile old: %v", err)
+	}
+	oldInfo, err := os.Lstat(oldPath)
+	if err != nil {
+		t.Fatalf("Lstat old: %v", err)
+	}
+	newInfo, err := os.Lstat(newPath)
+	if err != nil || !os.SameFile(oldInfo, newInfo) {
+		t.Skip("temp filesystem is case-sensitive")
+	}
+
+	result, err := runRenamePaths([]string{oldPath}, options{transforms: []transformStep{lowerStep()}})
+	if err != nil {
+		t.Fatalf("runRenamePaths: %v", err)
+	}
+	if result.renamed != 1 {
+		t.Fatalf("runRenamePaths summary = %+v", result)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "foo" {
+		t.Fatalf("case-only rename entries = %v, want foo", entries)
 	}
 }
 
@@ -1243,18 +1367,18 @@ func TestCLIRejectsDuplicateNumberPrefixFlags(t *testing.T) {
 func TestCLIConflictingRecursivePlanChangesNothing(t *testing.T) {
 	t.Parallel()
 
-	root := requireCaseSensitiveTempDir(t)
+	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "Foo"), []byte("old"), 0o644); err != nil {
 		t.Fatalf("WriteFile Foo: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "foo"), []byte("new"), 0o644); err != nil {
-		t.Fatalf("WriteFile foo: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "Bar"), []byte("other"), 0o644); err != nil {
 		t.Fatalf("WriteFile Bar: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "same"), []byte("target"), 0o644); err != nil {
+		t.Fatalf("WriteFile same: %v", err)
+	}
 
-	out, err := runCLI(t, "-r", "-l", root)
+	out, err := runCLI(t, "-r", "-e", `s/^(Foo|Bar)$/same/`, root)
 	if err == nil {
 		t.Fatalf("conflicting recursive run unexpectedly succeeded:\n%s", out)
 	}
@@ -1264,8 +1388,8 @@ func TestCLIConflictingRecursivePlanChangesNothing(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(root, "Bar")); statErr != nil {
 		t.Fatalf("Stat(Bar): %v", statErr)
 	}
-	if _, statErr := os.Stat(filepath.Join(root, "bar")); !os.IsNotExist(statErr) {
-		t.Fatalf("bar unexpectedly exists: %v", statErr)
+	if _, statErr := os.Stat(filepath.Join(root, "same")); statErr != nil {
+		t.Fatalf("Stat(same): %v", statErr)
 	}
 }
 
@@ -1384,15 +1508,19 @@ func TestCLIRecursiveFilesOnlyLeavesDirectoriesAlone(t *testing.T) {
 func TestCollectRenamePlansFailsBeforeStarting(t *testing.T) {
 	t.Parallel()
 
-	root := requireCaseSensitiveTempDir(t)
+	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "Foo"), []byte("old"), 0o644); err != nil {
 		t.Fatalf("WriteFile old: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "foo"), []byte("new"), 0o644); err != nil {
-		t.Fatalf("WriteFile new: %v", err)
-	}
 	if err := os.WriteFile(filepath.Join(root, "Bar"), []byte("other"), 0o644); err != nil {
 		t.Fatalf("WriteFile other: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "same"), []byte("target"), 0o644); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	r, err := parseExpression(`s/^(Foo|Bar)$/same/`)
+	if err != nil {
+		t.Fatalf("parseExpression: %v", err)
 	}
 
 	paths, err := collectPaths([]string{root}, true)
@@ -1400,7 +1528,7 @@ func TestCollectRenamePlansFailsBeforeStarting(t *testing.T) {
 		t.Fatalf("collectPaths: %v", err)
 	}
 	plans, summary, err := collectRenamePlans(paths, options{
-		transforms: []transformStep{lowerStep()},
+		transforms: []transformStep{{kind: transformRegex, replacer: r}},
 	}, nil)
 	if err == nil {
 		t.Fatal("collectRenamePlans succeeded, want error")
@@ -1414,13 +1542,10 @@ func TestCollectRenamePlansFailsBeforeStarting(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "Bar")); err != nil {
 		t.Fatalf("Stat(Bar): %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "bar")); !os.IsNotExist(err) {
-		t.Fatalf("bar unexpectedly exists: %v", err)
-	}
 	if _, err := os.Stat(filepath.Join(root, "Foo")); err != nil {
 		t.Fatalf("Stat(Foo): %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "foo")); err != nil {
-		t.Fatalf("Stat(foo): %v", err)
+	if _, err := os.Stat(filepath.Join(root, "same")); err != nil {
+		t.Fatalf("Stat(same): %v", err)
 	}
 }

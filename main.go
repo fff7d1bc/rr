@@ -129,7 +129,7 @@ Options:
                                  The leading digits define width and starting value.
                                  Any remaining text becomes the separator.
                                  Example: -N 001_ -> 001_, 002_, 003_ ...
-  --interactive, -i              Open an editor with planned renames before applying them.
+  --interactive, -i              Edit planned basenames before applying them.
   --color <mode>                 Colorize rename output: auto, always, never.
   --no-color                     Disable color output.
   --recursive, -r                Walk directories recursively.
@@ -141,6 +141,7 @@ Notes:
 
   Short boolean flags can be bundled, so -lrf means -l -r -f.
   Long flags must use --long-form, not -long-form.
+  Transforms and interactive edits may change only a basename, not its directory.
   All changes are validated before any rename is applied.
   Targets are never overwritten, even if they appear after validation.
   If applying a batch fails, completed renames are rolled back when possible.
@@ -400,7 +401,6 @@ func buildNumberedPlans(paths []string, opts options, numbering *numberingState)
 	next := numbering.next
 	var plans []renamePlan
 	skipped := 0
-	seenTargets := make(map[string]struct{})
 
 	for _, oldPath := range paths {
 		// Numbered runs are preflighted as a batch so we either reserve a full safe plan
@@ -414,11 +414,10 @@ func buildNumberedPlans(paths []string, opts options, numbering *numberingState)
 			continue
 		}
 		next++
-		if _, exists := seenTargets[plan.newPath]; exists {
-			return nil, skipped, formatError("target exists: %s", plan.newPath)
-		}
-		seenTargets[plan.newPath] = struct{}{}
 		plans = append(plans, plan)
+	}
+	if err := validateRenamePlans(plans); err != nil {
+		return nil, skipped, err
 	}
 
 	numbering.next = next
@@ -446,17 +445,11 @@ func planRename(oldPath string, opts options, number int) (renamePlan, bool, err
 	if newName == base {
 		return renamePlan{}, false, nil
 	}
-	if newName == "" {
-		return renamePlan{}, false, formatError("%s: transformation produced an empty name", oldPath)
+	if err := validateBasename(newName); err != nil {
+		return renamePlan{}, false, formatError("%s: transformation produced an invalid name: %w", oldPath, err)
 	}
 
 	newPath := filepath.Join(dir, newName)
-	if conflict, err := targetPathConflicts(oldPath, info, newPath); err != nil {
-		return renamePlan{}, false, formatError("%s: %w", newPath, err)
-	} else if conflict {
-		return renamePlan{}, false, formatError("target exists: %s", newPath)
-	}
-
 	return renamePlan{oldPath: oldPath, newPath: newPath}, true, nil
 }
 
@@ -563,7 +556,7 @@ func editPlans(plans []renamePlan) ([]renamePlan, error) {
 	path := f.Name()
 	defer os.Remove(path)
 
-	if _, err := fmt.Fprintln(f, "# Edit only the second column. Format: <old><TAB><new>"); err != nil {
+	if _, err := fmt.Fprintln(f, "# Edit only the basename in the second column; targets must stay in the source directory."); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
@@ -632,44 +625,16 @@ func parseEditedPlans(path string, original []renamePlan) ([]renamePlan, error) 
 func validateEditedPlans(plans []renamePlan) ([]renamePlan, int, error) {
 	var out []renamePlan
 	skipped := 0
-	movingOldPaths := make(map[string]struct{}, len(plans))
-	seenOldPaths := make(map[string]struct{}, len(plans))
 	for _, plan := range plans {
-		if _, exists := seenOldPaths[plan.oldPath]; exists {
-			return nil, skipped, formatError("duplicate source path: %s", plan.oldPath)
-		}
-		seenOldPaths[plan.oldPath] = struct{}{}
-		if plan.newPath != "" && plan.newPath != plan.oldPath {
-			movingOldPaths[plan.oldPath] = struct{}{}
-		}
-	}
-
-	seenTargets := make(map[string]struct{}, len(plans))
-	for _, plan := range plans {
-		if plan.newPath == "" {
-			return nil, skipped, formatError("interactive plan produced an empty target for %s", plan.oldPath)
-		}
 		if plan.newPath == plan.oldPath {
 			skipped++
 			continue
 		}
-		if _, exists := seenTargets[plan.newPath]; exists {
-			return nil, skipped, formatError("target exists: %s", plan.newPath)
-		}
-		seenTargets[plan.newPath] = struct{}{}
-		// Only targets that will actually move away are safe to reuse in the edited plan.
-		if _, plannedSource := movingOldPaths[plan.newPath]; plannedSource {
-			out = append(out, plan)
-			continue
-		}
-		if conflict, err := targetPathConflicts(plan.oldPath, nil, plan.newPath); err != nil {
-			return nil, skipped, formatError("%s: %w", plan.newPath, err)
-		} else if conflict {
-			return nil, skipped, formatError("target exists: %s", plan.newPath)
-		}
 		out = append(out, plan)
 	}
-
+	if err := validateRenamePlans(out); err != nil {
+		return nil, skipped, err
+	}
 	return out, skipped, nil
 }
 
@@ -729,18 +694,29 @@ func validateRenamePlans(plans []renamePlan) error {
 	targets := make(map[string]struct{}, len(plans))
 
 	for _, plan := range plans {
-		if _, exists := oldPaths[plan.oldPath]; exists {
+		if err := validateRenamePair(plan); err != nil {
+			return err
+		}
+		oldKey, err := canonicalPathKey(plan.oldPath, true)
+		if err != nil {
+			return formatError("%s: %w", plan.oldPath, err)
+		}
+		if _, exists := oldPaths[oldKey]; exists {
 			return formatError("duplicate source path: %s", plan.oldPath)
 		}
-		oldPaths[plan.oldPath] = struct{}{}
+		oldPaths[oldKey] = struct{}{}
 	}
 
 	for _, plan := range plans {
-		if _, exists := targets[plan.newPath]; exists {
+		targetKey, err := canonicalPathKey(plan.newPath, false)
+		if err != nil {
+			return formatError("%s: %w", plan.newPath, err)
+		}
+		if _, exists := targets[targetKey]; exists {
 			return formatError("target exists: %s", plan.newPath)
 		}
-		targets[plan.newPath] = struct{}{}
-		if _, plannedSource := oldPaths[plan.newPath]; plannedSource {
+		targets[targetKey] = struct{}{}
+		if _, plannedSource := oldPaths[targetKey]; plannedSource {
 			continue
 		}
 		if conflict, err := targetPathConflicts(plan.oldPath, nil, plan.newPath); err != nil {
@@ -751,6 +727,105 @@ func validateRenamePlans(plans []renamePlan) error {
 	}
 
 	return nil
+}
+
+func validateBasename(name string) error {
+	if name == "" {
+		return errors.New("name is empty")
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("name %q is reserved", name)
+	}
+	if filepath.Base(name) != name || strings.ContainsRune(name, filepath.Separator) {
+		return fmt.Errorf("name %q contains a path separator", name)
+	}
+	return nil
+}
+
+func validateRenamePair(plan renamePlan) error {
+	if err := validateBasename(filepath.Base(plan.newPath)); err != nil {
+		return formatError("%s: invalid target name: %w", plan.newPath, err)
+	}
+	oldParent, err := canonicalParent(plan.oldPath)
+	if err != nil {
+		return formatError("%s: resolve source directory: %w", plan.oldPath, err)
+	}
+	newParent, err := canonicalParent(plan.newPath)
+	if err != nil {
+		return formatError("%s: resolve target directory: %w", plan.newPath, err)
+	}
+	if oldParent != newParent {
+		return formatError("target must remain in source directory: %s", plan.newPath)
+	}
+	return nil
+}
+
+func canonicalParent(path string) (string, error) {
+	abs, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(abs)
+}
+
+func canonicalPathKey(path string, mustExist bool) (string, error) {
+	parent, err := canonicalParent(path)
+	if err != nil {
+		return "", err
+	}
+	base := filepath.Base(path)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) && !mustExist {
+		return filepath.Join(parent, base), nil
+	}
+	if err != nil {
+		return "", err
+	}
+
+	actual, err := actualEntryName(parent, base, info)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(parent, actual), nil
+}
+
+func actualEntryName(parent, requested string, requestedInfo fs.FileInfo) (string, error) {
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return "", err
+	}
+	for _, entry := range entries {
+		if entry.Name() == requested {
+			return requested, nil
+		}
+	}
+
+	var folded []string
+	var sameFile []string
+	for _, entry := range entries {
+		candidate := filepath.Join(parent, entry.Name())
+		info, err := os.Lstat(candidate)
+		if err != nil {
+			continue
+		}
+		if !os.SameFile(requestedInfo, info) {
+			continue
+		}
+		sameFile = append(sameFile, entry.Name())
+		if strings.EqualFold(requested, entry.Name()) {
+			folded = append(folded, entry.Name())
+		}
+	}
+	if len(folded) == 1 {
+		return folded[0], nil
+	}
+	if len(sameFile) == 1 {
+		return sameFile[0], nil
+	}
+	if len(sameFile) > 1 {
+		return "", fmt.Errorf("path spelling %q is ambiguous among hard links", requested)
+	}
+	return "", fmt.Errorf("directory entry %q disappeared during validation", requested)
 }
 
 func executeRenamePlans(plans []renamePlan, opts options) (summary, error) {
@@ -771,22 +846,37 @@ func executeRenamePlansWith(plans []renamePlan, opts options, move renameFunc) (
 		}
 		return summary{planned: len(plans)}, nil
 	}
+	if err := validateRenamePlans(plans); err != nil {
+		return summary{}, err
+	}
 
 	type pendingRename struct {
 		currentPath string
+		currentKey  string
 		finalPath   string
+		finalKey    string
 		displayOld  string
 	}
 
 	pending := make([]*pendingRename, 0, len(plans))
 	currentPaths := make(map[string]struct{}, len(plans))
 	for _, plan := range plans {
+		currentKey, err := canonicalPathKey(plan.oldPath, true)
+		if err != nil {
+			return summary{}, formatError("%s: %w", plan.oldPath, err)
+		}
+		finalKey, err := canonicalPathKey(plan.newPath, false)
+		if err != nil {
+			return summary{}, formatError("%s: %w", plan.newPath, err)
+		}
 		pending = append(pending, &pendingRename{
 			currentPath: plan.oldPath,
+			currentKey:  currentKey,
 			finalPath:   plan.newPath,
+			finalKey:    finalKey,
 			displayOld:  plan.oldPath,
 		})
-		currentPaths[plan.oldPath] = struct{}{}
+		currentPaths[currentKey] = struct{}{}
 	}
 
 	var journal []completedMove
@@ -848,15 +938,19 @@ func executeRenamePlansWith(plans []renamePlan, opts options, move renameFunc) (
 				if err != nil {
 					return fail(err)
 				}
-				delete(currentPaths, plan.currentPath)
+				delete(currentPaths, plan.currentKey)
 				plan.currentPath = tmpPath
-				currentPaths[tmpPath] = struct{}{}
+				plan.currentKey, err = canonicalPathKey(tmpPath, true)
+				if err != nil {
+					return fail(formatError("%s: %w", tmpPath, err))
+				}
+				currentPaths[plan.currentKey] = struct{}{}
 				nextPending = append(nextPending, plan)
 				progressed = true
 				continue
 			}
 			// A rename can proceed once no other pending item still occupies its destination.
-			if _, blocked := currentPaths[plan.finalPath]; blocked {
+			if _, blocked := currentPaths[plan.finalKey]; blocked {
 				nextPending = append(nextPending, plan)
 				continue
 			}
@@ -864,7 +958,7 @@ func executeRenamePlansWith(plans []renamePlan, opts options, move renameFunc) (
 				return fail(err)
 			}
 			completed = append(completed, renamePlan{oldPath: plan.displayOld, newPath: plan.finalPath})
-			delete(currentPaths, plan.currentPath)
+			delete(currentPaths, plan.currentKey)
 			progressed = true
 		}
 		pending = nextPending
@@ -879,9 +973,13 @@ func executeRenamePlansWith(plans []renamePlan, opts options, move renameFunc) (
 		if err != nil {
 			return fail(err)
 		}
-		delete(currentPaths, cycle.currentPath)
+		delete(currentPaths, cycle.currentKey)
 		cycle.currentPath = tmpPath
-		currentPaths[tmpPath] = struct{}{}
+		cycle.currentKey, err = canonicalPathKey(tmpPath, true)
+		if err != nil {
+			return fail(formatError("%s: %w", tmpPath, err))
+		}
+		currentPaths[cycle.currentKey] = struct{}{}
 	}
 
 	for _, plan := range completed {
@@ -891,28 +989,18 @@ func executeRenamePlansWith(plans []renamePlan, opts options, move renameFunc) (
 }
 
 func pathsReferToSameEntry(first, second string) (bool, error) {
-	firstInfo, err := os.Lstat(first)
+	firstKey, err := canonicalPathKey(first, true)
 	if err != nil {
 		return false, err
 	}
-	secondInfo, err := os.Lstat(second)
+	secondKey, err := canonicalPathKey(second, true)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	if !os.SameFile(firstInfo, secondInfo) {
-		return false, nil
-	}
-
-	firstDir := filepath.Clean(filepath.Dir(first))
-	secondDir := filepath.Clean(filepath.Dir(second))
-	if firstDir != secondDir || !strings.EqualFold(filepath.Base(first), filepath.Base(second)) {
-		return false, nil
-	}
-	hasBoth, err := dirHasDistinctEntries(firstDir, filepath.Base(first), filepath.Base(second))
-	return !hasBoth, err
+	return firstKey == secondKey, nil
 }
 
 const (
