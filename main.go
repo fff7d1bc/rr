@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -140,6 +142,9 @@ Notes:
   Short boolean flags can be bundled, so -lrf means -l -r -f.
   Long flags must use --long-form, not -long-form.
   All changes are validated before any rename is applied.
+  Targets are never overwritten, even if they appear after validation.
+  If applying a batch fails, completed renames are rolled back when possible.
+  Abrupt process or system termination can still leave a partially applied batch.
   In auto mode, colors are used only on terminals that appear to support 256 colors.
   Colored output highlights the changed part of the basename in red -> green.
 `
@@ -377,60 +382,14 @@ func applyTransforms(name string, opts options, number int) string {
 	return out
 }
 
-func renamePath(oldPath string, opts options) (summary, error) {
-	if oldPath == "." {
-		return summary{skipped: 1}, nil
+func tempRenameCandidate(dir string) (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate temporary rename path: %w", err)
 	}
-	info, err := os.Lstat(oldPath)
-	if err != nil {
-		return summary{errors: 1}, formatError("%s: %w", oldPath, err)
-	}
-	if opts.filesOnly && info.IsDir() {
-		return summary{skipped: 1}, nil
-	}
-	if opts.dirsOnly && !info.IsDir() {
-		return summary{skipped: 1}, nil
-	}
-
-	base := filepath.Base(oldPath)
-	dir := filepath.Dir(oldPath)
-	number := 0
-	if opts.numbering != nil {
-		number = opts.numbering.next
-	}
-	newName := applyTransforms(base, opts, number)
-	if newName == base {
-		return summary{skipped: 1}, nil
-	}
-	if newName == "" {
-		return summary{errors: 1}, formatError("%s: transformation produced an empty name", oldPath)
-	}
-
-	newPath := filepath.Join(dir, newName)
-	if conflict, err := targetPathConflicts(oldPath, info, newPath); err != nil {
-		return summary{errors: 1}, formatError("%s: %w", newPath, err)
-	} else if conflict {
-		return summary{errors: 1}, formatError("target exists: %s", newPath)
-	}
-
-	result, err := applyRenamePlan(renamePlan{oldPath: oldPath, newPath: newPath}, opts)
-	if err == nil && opts.numbering != nil {
-		opts.numbering.next++
-	}
-	return result, err
-}
-
-func tempRenamePath(dir, newName string) (string, error) {
-	for i := 0; i < 1000; i++ {
-		candidate := filepath.Join(dir, fmt.Sprintf(".%s.rrtmp.%d", newName, i))
-		if _, err := os.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
-			return candidate, nil
-		} else if err != nil {
-			return "", formatError("%s: %w", candidate, err)
-		}
-	}
-
-	return "", formatError("could not allocate temporary path for %s", filepath.Join(dir, newName))
+	// The fixed-size random basename avoids exceeding NAME_MAX when the user's
+	// source or target name is already close to the filesystem limit.
+	return filepath.Join(dir, ".rrtmp-"+hex.EncodeToString(random[:])), nil
 }
 
 func buildNumberedPlans(paths []string, opts options, numbering *numberingState) ([]renamePlan, int, error) {
@@ -714,29 +673,6 @@ func validateEditedPlans(plans []renamePlan) ([]renamePlan, int, error) {
 	return out, skipped, nil
 }
 
-func applyRenamePlan(plan renamePlan, opts options) (summary, error) {
-	if opts.dryRun {
-		fmt.Println(formatRename(plan.oldPath, plan.newPath, opts.colorEnabled, true))
-		return summary{planned: 1}, nil
-	}
-
-	tmpPath, err := tempRenamePath(filepath.Dir(plan.oldPath), filepath.Base(plan.newPath))
-	if err != nil {
-		return summary{errors: 1}, err
-	}
-
-	if err := os.Rename(plan.oldPath, tmpPath); err != nil {
-		return summary{errors: 1}, formatError("rename %s -> %s: %w", plan.oldPath, tmpPath, err)
-	}
-	if err := os.Rename(tmpPath, plan.newPath); err != nil {
-		_ = os.Rename(tmpPath, plan.oldPath)
-		return summary{errors: 1}, formatError("rename %s -> %s: %w", tmpPath, plan.newPath, err)
-	}
-
-	fmt.Println(formatRename(plan.oldPath, plan.newPath, opts.colorEnabled, false))
-	return summary{renamed: 1}, nil
-}
-
 func collectRenamePlans(paths []string, opts options, numbering *numberingState) ([]renamePlan, summary, error) {
 	if opts.numbering != nil {
 		plans, skipped, err := buildNumberedPlans(paths, opts, numbering)
@@ -818,16 +754,22 @@ func validateRenamePlans(plans []renamePlan) error {
 }
 
 func executeRenamePlans(plans []renamePlan, opts options) (summary, error) {
+	return executeRenamePlansWith(plans, opts, renameNoReplace)
+}
+
+type renameFunc func(string, string) error
+
+type completedMove struct {
+	from string
+	to   string
+}
+
+func executeRenamePlansWith(plans []renamePlan, opts options, move renameFunc) (summary, error) {
 	if opts.dryRun {
-		var total summary
 		for _, plan := range plans {
-			current, err := applyRenamePlan(plan, opts)
-			total.add(current)
-			if err != nil {
-				return total, err
-			}
+			fmt.Println(formatRename(plan.oldPath, plan.newPath, opts.colorEnabled, true))
 		}
-		return total, nil
+		return summary{planned: len(plans)}, nil
 	}
 
 	type pendingRename struct {
@@ -847,21 +789,81 @@ func executeRenamePlans(plans []renamePlan, opts options) (summary, error) {
 		currentPaths[plan.oldPath] = struct{}{}
 	}
 
-	var total summary
+	var journal []completedMove
+	var completed []renamePlan
+	fail := func(primary error) (summary, error) {
+		var rollbackErrors []error
+		for i := len(journal) - 1; i >= 0; i-- {
+			entry := journal[i]
+			if err := move(entry.to, entry.from); err != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("rollback %s -> %s: %w", entry.to, entry.from, err))
+			}
+		}
+		if len(rollbackErrors) == 0 {
+			if len(journal) == 0 {
+				return summary{}, primary
+			}
+			return summary{}, errors.Join(primary, errors.New("all completed renames were rolled back"))
+		}
+		return summary{}, errors.Join(primary, errors.New("rollback incomplete"), errors.Join(rollbackErrors...))
+	}
+	doMove := func(from, to string) error {
+		if err := move(from, to); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				return formatError("target exists: %s", to)
+			}
+			return formatError("rename %s -> %s: %w", from, to, err)
+		}
+		journal = append(journal, completedMove{from: from, to: to})
+		return nil
+	}
+	moveToTemporary := func(from string) (string, error) {
+		for i := 0; i < 100; i++ {
+			candidate, err := tempRenameCandidate(filepath.Dir(from))
+			if err != nil {
+				return "", err
+			}
+			if err := move(from, candidate); err != nil {
+				if errors.Is(err, os.ErrExist) {
+					continue
+				}
+				return "", formatError("rename %s -> %s: %w", from, candidate, err)
+			}
+			journal = append(journal, completedMove{from: from, to: candidate})
+			return candidate, nil
+		}
+		return "", formatError("could not allocate temporary path beside %s", from)
+	}
+
 	for len(pending) > 0 {
 		progressed := false
 		nextPending := pending[:0]
 		for _, plan := range pending {
+			sameEntry, err := pathsReferToSameEntry(plan.currentPath, plan.finalPath)
+			if err != nil {
+				return fail(formatError("compare %s and %s: %w", plan.currentPath, plan.finalPath, err))
+			}
+			if sameEntry {
+				tmpPath, err := moveToTemporary(plan.currentPath)
+				if err != nil {
+					return fail(err)
+				}
+				delete(currentPaths, plan.currentPath)
+				plan.currentPath = tmpPath
+				currentPaths[tmpPath] = struct{}{}
+				nextPending = append(nextPending, plan)
+				progressed = true
+				continue
+			}
 			// A rename can proceed once no other pending item still occupies its destination.
 			if _, blocked := currentPaths[plan.finalPath]; blocked {
 				nextPending = append(nextPending, plan)
 				continue
 			}
-			if err := os.Rename(plan.currentPath, plan.finalPath); err != nil {
-				return total, formatError("rename %s -> %s: %w", plan.currentPath, plan.finalPath, err)
+			if err := doMove(plan.currentPath, plan.finalPath); err != nil {
+				return fail(err)
 			}
-			fmt.Println(formatRename(plan.displayOld, plan.finalPath, opts.colorEnabled, false))
-			total.renamed++
+			completed = append(completed, renamePlan{oldPath: plan.displayOld, newPath: plan.finalPath})
 			delete(currentPaths, plan.currentPath)
 			progressed = true
 		}
@@ -873,19 +875,44 @@ func executeRenamePlans(plans []renamePlan, opts options) (summary, error) {
 		// No destination is currently free, so we have a cycle such as a<->b.
 		// Break it by moving one element to a temporary sibling path first.
 		cycle := pending[0]
-		tmpPath, err := tempRenamePath(filepath.Dir(cycle.currentPath), filepath.Base(cycle.finalPath))
+		tmpPath, err := moveToTemporary(cycle.currentPath)
 		if err != nil {
-			return total, err
-		}
-		if err := os.Rename(cycle.currentPath, tmpPath); err != nil {
-			return total, formatError("rename %s -> %s: %w", cycle.currentPath, tmpPath, err)
+			return fail(err)
 		}
 		delete(currentPaths, cycle.currentPath)
 		cycle.currentPath = tmpPath
 		currentPaths[tmpPath] = struct{}{}
 	}
 
-	return total, nil
+	for _, plan := range completed {
+		fmt.Println(formatRename(plan.oldPath, plan.newPath, opts.colorEnabled, false))
+	}
+	return summary{renamed: len(completed)}, nil
+}
+
+func pathsReferToSameEntry(first, second string) (bool, error) {
+	firstInfo, err := os.Lstat(first)
+	if err != nil {
+		return false, err
+	}
+	secondInfo, err := os.Lstat(second)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !os.SameFile(firstInfo, secondInfo) {
+		return false, nil
+	}
+
+	firstDir := filepath.Clean(filepath.Dir(first))
+	secondDir := filepath.Clean(filepath.Dir(second))
+	if firstDir != secondDir || !strings.EqualFold(filepath.Base(first), filepath.Base(second)) {
+		return false, nil
+	}
+	hasBoth, err := dirHasDistinctEntries(firstDir, filepath.Base(first), filepath.Base(second))
+	return !hasBoth, err
 }
 
 const (

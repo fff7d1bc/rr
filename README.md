@@ -12,6 +12,8 @@ rr --help-long
 Important behavior:
 
 - `rr` builds the full rename plan first and checks for conflicts before changing anything
+- targets are never overwritten, including targets created after the plan was checked
+- if applying a batch fails, completed renames are rolled back when possible; abrupt process or system termination can still leave a partially applied batch
 - transform flags run in the order you pass them
 - short boolean flags can be bundled, for example `-lru`
 - long flags must use `--long-form`

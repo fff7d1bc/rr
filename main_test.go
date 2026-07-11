@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +31,20 @@ func numberingStep(width, next int, separator string) transformStep {
 		kind:      transformNumbering,
 		numbering: &numberingOptions{width: width, next: next, separator: separator},
 	}
+}
+
+func runRenamePaths(paths []string, opts options) (summary, error) {
+	var numbering *numberingState
+	if opts.numbering != nil {
+		numbering = &numberingState{next: opts.numbering.next}
+	}
+	plans, total, err := collectRenamePlans(paths, opts, numbering)
+	if err != nil {
+		return total, err
+	}
+	current, err := executeRenamePlans(plans, opts)
+	total.add(current)
+	return total, err
 }
 
 func requireCaseSensitiveTempDir(t *testing.T) string {
@@ -464,7 +479,7 @@ func TestRecursiveNumberingCombinationRejected(t *testing.T) {
 	}
 }
 
-func TestRenamePathAppliesTransforms(t *testing.T) {
+func TestExecuteRenamePlansAppliesTransforms(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -473,14 +488,14 @@ func TestRenamePathAppliesTransforms(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	result, err := renamePath(oldPath, options{
+	result, err := runRenamePaths([]string{oldPath}, options{
 		transforms: []transformStep{lowerStep(), underscoreStep()},
 	})
 	if err != nil {
-		t.Fatalf("renamePath: %v", err)
+		t.Fatalf("runRenamePaths: %v", err)
 	}
 	if result.renamed != 1 || result.planned != 0 || result.skipped != 0 || result.errors != 0 {
-		t.Fatalf("renamePath summary = %+v", result)
+		t.Fatalf("runRenamePaths summary = %+v", result)
 	}
 
 	newPath := filepath.Join(dir, "foo_bar.jpg")
@@ -535,7 +550,7 @@ func TestRecursivePlanRenamesChildrenBeforeParents(t *testing.T) {
 	}
 }
 
-func TestRenamePathRejectsExistingTarget(t *testing.T) {
+func TestExecuteRenamePlansRejectsExistingTarget(t *testing.T) {
 	t.Parallel()
 
 	dir := requireCaseSensitiveTempDir(t)
@@ -549,19 +564,19 @@ func TestRenamePathRejectsExistingTarget(t *testing.T) {
 		t.Fatalf("WriteFile new: %v", err)
 	}
 
-	result, err := renamePath(oldPath, options{transforms: []transformStep{lowerStep()}})
+	result, err := runRenamePaths([]string{oldPath}, options{transforms: []transformStep{lowerStep()}})
 	if err == nil {
-		t.Fatal("renamePath succeeded, want error")
+		t.Fatal("runRenamePaths succeeded, want error")
 	}
-	if result.errors != 1 {
-		t.Fatalf("renamePath summary = %+v", result)
+	if result.renamed != 0 {
+		t.Fatalf("runRenamePaths summary = %+v", result)
 	}
 	if !strings.Contains(err.Error(), "target exists") {
-		t.Fatalf("renamePath error = %v, want target exists", err)
+		t.Fatalf("runRenamePaths error = %v, want target exists", err)
 	}
 }
 
-func TestRenamePathReplacesWhitespaceRuns(t *testing.T) {
+func TestExecuteRenamePlansReplacesWhitespaceRuns(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -570,12 +585,12 @@ func TestRenamePathReplacesWhitespaceRuns(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	result, err := renamePath(oldPath, options{transforms: []transformStep{underscoreStep()}})
+	result, err := runRenamePaths([]string{oldPath}, options{transforms: []transformStep{underscoreStep()}})
 	if err != nil {
-		t.Fatalf("renamePath: %v", err)
+		t.Fatalf("runRenamePaths: %v", err)
 	}
 	if result.renamed != 1 {
-		t.Fatalf("renamePath summary = %+v", result)
+		t.Fatalf("runRenamePaths summary = %+v", result)
 	}
 
 	newPath := filepath.Join(dir, "_Foo_Bar_.txt_")
@@ -584,7 +599,7 @@ func TestRenamePathReplacesWhitespaceRuns(t *testing.T) {
 	}
 }
 
-func TestRenamePathFilesOnlySkipsDirectories(t *testing.T) {
+func TestExecuteRenamePlansFilesOnlySkipsDirectories(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -593,15 +608,15 @@ func TestRenamePathFilesOnlySkipsDirectories(t *testing.T) {
 		t.Fatalf("Mkdir: %v", err)
 	}
 
-	result, err := renamePath(targetDir, options{
+	result, err := runRenamePaths([]string{targetDir}, options{
 		filesOnly:  true,
 		transforms: []transformStep{underscoreStep()},
 	})
 	if err != nil {
-		t.Fatalf("renamePath: %v", err)
+		t.Fatalf("runRenamePaths: %v", err)
 	}
 	if result.skipped != 1 {
-		t.Fatalf("renamePath summary = %+v", result)
+		t.Fatalf("runRenamePaths summary = %+v", result)
 	}
 
 	if _, err := os.Stat(targetDir); err != nil {
@@ -609,7 +624,7 @@ func TestRenamePathFilesOnlySkipsDirectories(t *testing.T) {
 	}
 }
 
-func TestRenamePathNumberPrefix(t *testing.T) {
+func TestExecuteRenamePlansNumberPrefix(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -619,25 +634,22 @@ func TestRenamePathNumberPrefix(t *testing.T) {
 	}
 
 	numbering := &numberingOptions{width: 3, next: 1, separator: "_"}
-	result, err := renamePath(oldPath, options{
+	result, err := runRenamePaths([]string{oldPath}, options{
 		transforms: []transformStep{numberingStep(3, 1, "_")},
 		numbering:  numbering,
 	})
 	if err != nil {
-		t.Fatalf("renamePath: %v", err)
+		t.Fatalf("runRenamePaths: %v", err)
 	}
 	if result.renamed != 1 {
-		t.Fatalf("renamePath summary = %+v", result)
-	}
-	if numbering.next != 2 {
-		t.Fatalf("numbering.next = %d, want 2", numbering.next)
+		t.Fatalf("runRenamePaths summary = %+v", result)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "001_Photo.JPG")); err != nil {
 		t.Fatalf("Stat numbered file: %v", err)
 	}
 }
 
-func TestRenamePathNumberPrefixWithoutSeparator(t *testing.T) {
+func TestExecuteRenamePlansNumberPrefixWithoutSeparator(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -646,15 +658,15 @@ func TestRenamePathNumberPrefixWithoutSeparator(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	result, err := renamePath(oldPath, options{
+	result, err := runRenamePaths([]string{oldPath}, options{
 		transforms: []transformStep{numberingStep(2, 1, "")},
 		numbering:  &numberingOptions{width: 2, next: 1, separator: ""},
 	})
 	if err != nil {
-		t.Fatalf("renamePath: %v", err)
+		t.Fatalf("runRenamePaths: %v", err)
 	}
 	if result.renamed != 1 {
-		t.Fatalf("renamePath summary = %+v", result)
+		t.Fatalf("runRenamePaths summary = %+v", result)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "01foo.txt")); err != nil {
 		t.Fatalf("Stat numbered file: %v", err)
@@ -815,6 +827,154 @@ func TestExecuteRenamePlansSwapsFiles(t *testing.T) {
 	if string(dataA) != "B" || string(dataB) != "A" {
 		t.Fatalf("swap contents = %q/%q, want B/A", string(dataA), string(dataB))
 	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".rrtmp-") {
+			t.Fatalf("temporary rename path left behind: %s", entry.Name())
+		}
+	}
+}
+
+func TestRenameNoReplacePreservesExistingTarget(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source")
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(source, []byte("source"), 0o644); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("target"), 0o644); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+
+	if err := renameNoReplace(source, target); err == nil {
+		t.Fatal("renameNoReplace succeeded with an existing target")
+	}
+	for path, want := range map[string]string{source: "source", target: "target"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%q): %v", path, err)
+		}
+		if string(data) != want {
+			t.Fatalf("ReadFile(%q) = %q, want %q", path, data, want)
+		}
+	}
+}
+
+func TestExecuteRenamePlansRejectsTargetCreatedAfterValidation(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source")
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(source, []byte("source"), 0o644); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+	plans := []renamePlan{{oldPath: source, newPath: target}}
+	if err := validateRenamePlans(plans); err != nil {
+		t.Fatalf("validateRenamePlans: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("target"), 0o644); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+
+	result, err := executeRenamePlans(plans, options{})
+	if err == nil {
+		t.Fatal("executeRenamePlans succeeded after target appeared")
+	}
+	if result.renamed != 0 || !strings.Contains(err.Error(), "target exists") {
+		t.Fatalf("executeRenamePlans result=%+v err=%v", result, err)
+	}
+	for path, want := range map[string]string{source: "source", target: "target"} {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("ReadFile(%q): %v", path, readErr)
+		}
+		if string(data) != want {
+			t.Fatalf("ReadFile(%q) = %q, want %q", path, data, want)
+		}
+	}
+}
+
+func TestExecuteRenamePlansRollsBackCompletedMoves(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	one := filepath.Join(dir, "one")
+	two := filepath.Join(dir, "two")
+	if err := os.WriteFile(one, []byte("one"), 0o644); err != nil {
+		t.Fatalf("WriteFile one: %v", err)
+	}
+	if err := os.WriteFile(two, []byte("two"), 0o644); err != nil {
+		t.Fatalf("WriteFile two: %v", err)
+	}
+
+	calls := 0
+	injected := errors.New("injected move failure")
+	move := func(oldPath, newPath string) error {
+		calls++
+		if calls == 2 {
+			return injected
+		}
+		return renameNoReplace(oldPath, newPath)
+	}
+	result, err := executeRenamePlansWith([]renamePlan{
+		{oldPath: one, newPath: filepath.Join(dir, "one-new")},
+		{oldPath: two, newPath: filepath.Join(dir, "two-new")},
+	}, options{}, move)
+	if err == nil || !errors.Is(err, injected) {
+		t.Fatalf("executeRenamePlansWith error = %v, want injected failure", err)
+	}
+	if result.renamed != 0 || !strings.Contains(err.Error(), "rolled back") {
+		t.Fatalf("executeRenamePlansWith result=%+v err=%v", result, err)
+	}
+	for _, path := range []string{one, two} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("source %q not restored: %v", path, statErr)
+		}
+	}
+	for _, path := range []string{filepath.Join(dir, "one-new"), filepath.Join(dir, "two-new")} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("target %q remains after rollback: %v", path, statErr)
+		}
+	}
+}
+
+func TestExecuteRenamePlansReportsRollbackFailure(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	one := filepath.Join(dir, "one")
+	two := filepath.Join(dir, "two")
+	if err := os.WriteFile(one, []byte("one"), 0o644); err != nil {
+		t.Fatalf("WriteFile one: %v", err)
+	}
+	if err := os.WriteFile(two, []byte("two"), 0o644); err != nil {
+		t.Fatalf("WriteFile two: %v", err)
+	}
+
+	calls := 0
+	move := func(oldPath, newPath string) error {
+		calls++
+		if calls == 2 {
+			return errors.New("forward failure")
+		}
+		if calls == 3 {
+			return errors.New("rollback failure")
+		}
+		return renameNoReplace(oldPath, newPath)
+	}
+	_, err := executeRenamePlansWith([]renamePlan{
+		{oldPath: one, newPath: filepath.Join(dir, "one-new")},
+		{oldPath: two, newPath: filepath.Join(dir, "two-new")},
+	}, options{}, move)
+	if err == nil || !strings.Contains(err.Error(), "rollback incomplete") || !strings.Contains(err.Error(), "rollback failure") {
+		t.Fatalf("executeRenamePlansWith error = %v", err)
+	}
 }
 
 func TestValidateRenamePlansAllowsChainedTargets(t *testing.T) {
@@ -956,7 +1116,7 @@ func TestValidateRenamePlansRejectsDuplicateSources(t *testing.T) {
 	}
 }
 
-func TestRenamePathNumberingDoesNotAdvanceOnError(t *testing.T) {
+func TestExecuteRenamePlansNumberingChangesNothingOnError(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -970,33 +1130,36 @@ func TestRenamePathNumberingDoesNotAdvanceOnError(t *testing.T) {
 	}
 
 	numbering := &numberingOptions{width: 3, next: 1, separator: "_"}
-	result, err := renamePath(oldPath, options{
+	result, err := runRenamePaths([]string{oldPath}, options{
 		transforms: []transformStep{numberingStep(3, 1, "_")},
 		numbering:  numbering,
 	})
 	if err == nil {
-		t.Fatal("renamePath succeeded, want error")
+		t.Fatal("runRenamePaths succeeded, want error")
 	}
-	if result.errors != 1 {
-		t.Fatalf("renamePath summary = %+v", result)
+	if result.renamed != 0 {
+		t.Fatalf("runRenamePaths summary = %+v", result)
 	}
 	if numbering.next != 1 {
 		t.Fatalf("numbering.next = %d, want unchanged 1", numbering.next)
 	}
+	if _, err := os.Stat(oldPath); err != nil {
+		t.Fatalf("source changed after failed numbered plan: %v", err)
+	}
 }
 
-func TestApplyRenamePlanDryRunCountsPlanned(t *testing.T) {
+func TestExecuteRenamePlanDryRunCountsPlanned(t *testing.T) {
 	t.Parallel()
 
-	result, err := applyRenamePlan(renamePlan{
+	result, err := executeRenamePlans([]renamePlan{{
 		oldPath: "/tmp/old.txt",
 		newPath: "/tmp/new.txt",
-	}, options{dryRun: true})
+	}}, options{dryRun: true})
 	if err != nil {
-		t.Fatalf("applyRenamePlan: %v", err)
+		t.Fatalf("executeRenamePlans: %v", err)
 	}
 	if result.planned != 1 || result.renamed != 0 {
-		t.Fatalf("applyRenamePlan summary = %+v", result)
+		t.Fatalf("executeRenamePlans summary = %+v", result)
 	}
 }
 
