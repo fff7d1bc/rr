@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1255,6 +1257,156 @@ func TestValidateEditedPlansRejectsDirectoryChange(t *testing.T) {
 	_, _, err := validateEditedPlans([]renamePlan{{oldPath: source, newPath: filepath.Join(other, "target")}})
 	if err == nil || !strings.Contains(err.Error(), "target must remain in source directory") {
 		t.Fatalf("validateEditedPlans error = %v", err)
+	}
+}
+
+func TestEditPlansRemovesTemporaryFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source")
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(source, []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+	var planPath string
+	edited, err := editPlansWith([]renamePlan{{oldPath: source, newPath: target}}, func(path string) error {
+		planPath = path
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("temporary plan unavailable to editor: %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("editPlansWith: %v", err)
+	}
+	if len(edited) != 1 || edited[0].oldPath != source || edited[0].newPath != target {
+		t.Fatalf("editPlansWith result = %+v", edited)
+	}
+	if _, err := os.Stat(planPath); !os.IsNotExist(err) {
+		t.Fatalf("temporary plan still exists after editing: %v", err)
+	}
+}
+
+func TestEditPlansRemovesTemporaryFileAfterEditorError(t *testing.T) {
+	t.Parallel()
+
+	var planPath string
+	injected := errors.New("editor failed")
+	_, err := editPlansWith(nil, func(path string) error {
+		planPath = path
+		return injected
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("editPlansWith error = %v, want injected error", err)
+	}
+	if _, err := os.Stat(planPath); !os.IsNotExist(err) {
+		t.Fatalf("temporary plan still exists after editor error: %v", err)
+	}
+}
+
+func TestRunInteractiveSupportsEditThenYes(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source")
+	firstTarget := filepath.Join(dir, "first")
+	secondTarget := filepath.Join(dir, "second")
+	if err := os.WriteFile(source, []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+	calls := 0
+	edit := func(current []renamePlan) ([]renamePlan, error) {
+		calls++
+		if calls == 1 {
+			return []renamePlan{{oldPath: source, newPath: firstTarget}}, nil
+		}
+		if len(current) != 1 || current[0].newPath != firstTarget {
+			t.Fatalf("second edit received %+v, want first edited plan", current)
+		}
+		return []renamePlan{{oldPath: source, newPath: secondTarget}}, nil
+	}
+	got, _, err := runInteractiveWith(
+		[]renamePlan{{oldPath: source, newPath: source}},
+		options{},
+		edit,
+		bufio.NewReader(strings.NewReader("edit\nyes\n")),
+	)
+	if err != nil {
+		t.Fatalf("runInteractiveWith: %v", err)
+	}
+	if calls != 2 || len(got) != 1 || got[0].newPath != secondTarget {
+		t.Fatalf("runInteractiveWith calls=%d plans=%+v", calls, got)
+	}
+}
+
+func TestRunInteractiveCancel(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source")
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(source, []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+	_, _, err := runInteractiveWith(
+		[]renamePlan{{oldPath: source, newPath: target}},
+		options{},
+		func(current []renamePlan) ([]renamePlan, error) { return current, nil },
+		bufio.NewReader(strings.NewReader("cancel\n")),
+	)
+	if err == nil || err.Error() != "canceled" {
+		t.Fatalf("runInteractiveWith error = %v, want canceled", err)
+	}
+}
+
+func TestRunInteractiveReopensInvalidPlan(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	otherDir := filepath.Join(dir, "other")
+	if err := os.Mkdir(otherDir, 0o755); err != nil {
+		t.Fatalf("Mkdir other: %v", err)
+	}
+	source := filepath.Join(dir, "source")
+	validTarget := filepath.Join(dir, "target")
+	if err := os.WriteFile(source, []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+	calls := 0
+	edit := func(current []renamePlan) ([]renamePlan, error) {
+		calls++
+		if calls == 1 {
+			return []renamePlan{{oldPath: source, newPath: filepath.Join(otherDir, "invalid")}}, nil
+		}
+		return []renamePlan{{oldPath: source, newPath: validTarget}}, nil
+	}
+	got, _, err := runInteractiveWith(
+		[]renamePlan{{oldPath: source, newPath: validTarget}},
+		options{},
+		edit,
+		bufio.NewReader(strings.NewReader("yes\n")),
+	)
+	if err != nil {
+		t.Fatalf("runInteractiveWith: %v", err)
+	}
+	if calls != 2 || len(got) != 1 || got[0].newPath != validTarget {
+		t.Fatalf("runInteractiveWith calls=%d plans=%+v", calls, got)
+	}
+}
+
+func TestParseEditedPlansRejectsChangedSource(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plan.txt")
+	original := []renamePlan{{oldPath: filepath.Join(dir, "source"), newPath: filepath.Join(dir, "target")}}
+	data := fmt.Sprintf("%q\t%q\n", filepath.Join(dir, "other"), original[0].newPath)
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("WriteFile plan: %v", err)
+	}
+	if _, err := parseEditedPlans(path, original); err == nil || !strings.Contains(err.Error(), "changed or reordered old paths") {
+		t.Fatalf("parseEditedPlans error = %v", err)
 	}
 }
 

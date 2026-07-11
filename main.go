@@ -511,11 +511,14 @@ func collectInteractivePlans(args []string, recursive bool, opts options) ([]ren
 }
 
 func runInteractive(plans []renamePlan, opts options) ([]renamePlan, summary, error) {
+	return runInteractiveWith(plans, opts, editPlans, bufio.NewReader(os.Stdin))
+}
+
+func runInteractiveWith(plans []renamePlan, opts options, edit func([]renamePlan) ([]renamePlan, error), reader *bufio.Reader) ([]renamePlan, summary, error) {
 	current := plans
-	reader := bufio.NewReader(os.Stdin)
 
 	for {
-		edited, err := editPlans(current)
+		edited, err := edit(current)
 		if err != nil {
 			return nil, summary{}, err
 		}
@@ -550,6 +553,10 @@ func runInteractive(plans []renamePlan, opts options) ([]renamePlan, summary, er
 }
 
 func editPlans(plans []renamePlan) ([]renamePlan, error) {
+	return editPlansWith(plans, runPlanEditor)
+}
+
+func editPlansWith(plans []renamePlan, runEditor func(string) error) ([]renamePlan, error) {
 	f, err := os.CreateTemp("", "rr-plan-*.txt")
 	if err != nil {
 		return nil, err
@@ -571,15 +578,19 @@ func editPlans(plans []renamePlan) ([]renamePlan, error) {
 		return nil, err
 	}
 
-	cmd := exec.Command("sh", "-c", `${EDITOR:-vi} "$1"`, "rr", path)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := runEditor(path); err != nil {
 		return nil, err
 	}
 
 	return parseEditedPlans(path, plans)
+}
+
+func runPlanEditor(path string) error {
+	cmd := exec.Command("sh", "-c", `${EDITOR:-vi} "$1"`, "rr", path)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 func parseEditedPlans(path string, original []renamePlan) ([]renamePlan, error) {
