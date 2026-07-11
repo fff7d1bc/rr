@@ -87,6 +87,18 @@ func TestParseExpressionApply(t *testing.T) {
 			want:  "IMG-1234",
 		},
 		{
+			name:  "capture followed by letters",
+			expr:  `s/(foo)/\1copy/`,
+			input: "foo.txt",
+			want:  "foocopy.txt",
+		},
+		{
+			name:  "multi-digit capture followed by letters",
+			expr:  `s/(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)/\10copy/`,
+			input: "abcdefghij.txt",
+			want:  "jcopy.txt",
+		},
+		{
 			name:  "escaped delimiter in pattern and replacement",
 			expr:  `s#/foo/#/bar/#`,
 			input: "/foo/file",

@@ -26,7 +26,7 @@ Important behavior:
 
 Main flags:
 
-- `-e`, `--sub <expr>`: regex substitution, repeatable
+- `-e`, `--sub <expr>`: Go-regexp substitution, repeatable; use `\1`, `\2`, and so on for numeric captures in replacements
 - `-u`, `--underscores`: replace whitespace runs with underscores
 - `-l`, `--lower`: lowercase basenames
 - `-f`, `--files-only`: rename files only

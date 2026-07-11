@@ -120,7 +120,7 @@ then rename the path on disk.
 
 Options:
 
-  --sub, -e <expr>               Regex substitution, e.g. 's/foo/bar/g'. Repeatable.
+  --sub, -e <expr>               Go-regexp substitution, e.g. 's/foo/bar/g'. Repeatable.
   --underscores, -u              Replace whitespace runs with underscores.
   --lower, -l                    Convert names to lower case.
   --files-only, -f               Rename files only.
@@ -142,6 +142,7 @@ Notes:
   Short boolean flags can be bundled, so -lrf means -l -r -f.
   Long flags must use --long-form, not -long-form.
   Transforms and interactive edits may change only a basename, not its directory.
+  Substitution replacements use sed-style numeric captures such as \1 and \2.
   All changes are validated before any rename is applied.
   Targets are never overwritten, even if they appear after validation.
   If applying a batch fails, completed renames are rolled back when possible.
@@ -184,7 +185,7 @@ Examples:
       rr -r -u -e 's/__+/_/g' ./incoming
 
   Remove years from names:
-      rr -r -e 's/[ _-]?\([0-9]{4}\)//g' ./archive
+      rr -r -e 's/[ _-]?[0-9]{4}//g' ./archive
 
   Remove bracketed tags like "[draft]" or "[1080p]":
       rr -r -e 's/ *\[[^]]+\]//g' ./incoming
@@ -1204,11 +1205,14 @@ func normalizeReplacement(in string) string {
 
 	for i := 0; i < len(in); i++ {
 		if in[i] == '\\' && i+1 < len(in) && in[i+1] >= '0' && in[i+1] <= '9' {
-			out.WriteByte('$')
+			// Braces keep a following letter from becoming part of the Go regexp
+			// expansion name: sed's \1copy must mean group 1 plus "copy".
+			out.WriteString("${")
 			i++
 			for ; i < len(in) && in[i] >= '0' && in[i] <= '9'; i++ {
 				out.WriteByte(in[i])
 			}
+			out.WriteByte('}')
 			i--
 			continue
 		}
