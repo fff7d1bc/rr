@@ -3,6 +3,7 @@ BUILD_DIR := $(CURDIR)/build
 GOOS ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)
 PLATFORM := $(GOOS)-$(GOARCH)
+SUPPORTED_GOOS := darwin linux
 PLATFORM_BUILD_DIR := $(BUILD_DIR)/$(PLATFORM)
 BIN_DIR := $(PLATFORM_BUILD_DIR)/bin
 BIN := $(BIN_DIR)/$(APP)
@@ -26,15 +27,18 @@ export GOENV
 export GOFLAGS
 export GOTELEMETRY=off
 
-.PHONY: all build test static run install clean
+.PHONY: all check-platform build test static run install clean
 
 all: build
 
-build: $(BIN)
+check-platform:
+	@case " $(SUPPORTED_GOOS) " in *" $(GOOS) "*) ;; *) echo "unsupported GOOS: $(GOOS); supported: $(SUPPORTED_GOOS)" >&2; exit 1;; esac
 
-static: $(STATIC_BIN)
+build: check-platform $(BIN)
 
-test:
+static: check-platform $(STATIC_BIN)
+
+test: check-platform
 	mkdir -p "$(GOCACHE)" "$(GOMODCACHE)" "$(GOPATH)" "$(GOTMPDIR)" "$(GOTELEMETRYDIR)"
 	go test ./...
 
@@ -45,7 +49,7 @@ $(BIN): $(GO_MODULE_FILES) $(GO_SOURCES)
 $(STATIC_BIN): $(GO_MODULE_FILES) $(GO_SOURCES)
 	mkdir -p "$(BIN_DIR)" "$(GOCACHE)" "$(GOMODCACHE)" "$(GOPATH)" "$(GOTMPDIR)" "$(GOTELEMETRYDIR)"
 	CGO_ENABLED=0 go build -trimpath -tags "netgo osusergo" -ldflags "-s -w -buildid=" -o "$(STATIC_BIN)" .
-	@echo "static binary: $(STATIC_BIN)"
+	@echo "CGO-disabled stripped binary: $(STATIC_BIN)"
 
 run: build
 	"$(BIN)" $(ARGS)

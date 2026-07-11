@@ -49,6 +49,12 @@ rr -r -u -e 's/__+/_/g' ./incoming
 rr -e 's/^([^,]+), (.+)$/\2 \1/' *
 ```
 
+Requirements:
+
+- Linux or macOS with Go 1.21 or newer
+- GNU Make, a POSIX shell, and standard Unix build tools for the Makefile workflows
+- `sh` plus `$EDITOR` or `vi` for interactive editing
+
 Build and install:
 
 ```sh
@@ -56,6 +62,10 @@ make build
 make static
 make install
 ```
+
+`make static` creates a stripped, CGO-disabled `rr-static`. Linux builds are
+fully static with the current dependency set; on macOS the binary still links
+the operating system's standard dynamic libraries.
 
 Binary:
 
