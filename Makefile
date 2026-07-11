@@ -8,6 +8,7 @@ BIN_DIR := $(PLATFORM_BUILD_DIR)/bin
 BIN := $(BIN_DIR)/$(APP)
 STATIC_BIN := $(BIN_DIR)/$(APP)-static
 GO_SOURCES := $(wildcard *.go)
+GO_MODULE_FILES := go.mod $(wildcard go.sum)
 GOCACHE := $(PLATFORM_BUILD_DIR)/gocache
 GOMODCACHE := $(PLATFORM_BUILD_DIR)/gomodcache
 GOPATH := $(PLATFORM_BUILD_DIR)/gopath
@@ -37,11 +38,11 @@ test:
 	mkdir -p "$(GOCACHE)" "$(GOMODCACHE)" "$(GOPATH)" "$(GOTMPDIR)" "$(GOTELEMETRYDIR)"
 	go test ./...
 
-$(BIN): go.mod $(GO_SOURCES)
+$(BIN): $(GO_MODULE_FILES) $(GO_SOURCES)
 	mkdir -p "$(BIN_DIR)" "$(GOCACHE)" "$(GOMODCACHE)" "$(GOPATH)" "$(GOTMPDIR)" "$(GOTELEMETRYDIR)"
 	go build -trimpath -o "$(BIN)" .
 
-$(STATIC_BIN): go.mod $(GO_SOURCES)
+$(STATIC_BIN): $(GO_MODULE_FILES) $(GO_SOURCES)
 	mkdir -p "$(BIN_DIR)" "$(GOCACHE)" "$(GOMODCACHE)" "$(GOPATH)" "$(GOTMPDIR)" "$(GOTELEMETRYDIR)"
 	CGO_ENABLED=0 go build -trimpath -tags "netgo osusergo" -ldflags "-s -w -buildid=" -o "$(STATIC_BIN)" .
 	@echo "static binary: $(STATIC_BIN)"
