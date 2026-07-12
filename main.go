@@ -144,7 +144,8 @@ Notes:
   Transforms and interactive edits may change only a basename, not its directory.
   Substitution replacements use sed-style numeric captures such as \1 and \2.
   All changes are validated before any rename is applied.
-  Targets are never overwritten, even if they appear after validation.
+  Targets are checked before the batch and immediately before each rename.
+  A target created concurrently between the final check and rename may be overwritten.
   If applying a batch fails, completed renames are rolled back when possible.
   Abrupt process or system termination can still leave a partially applied batch.
   In auto mode, colors are used only on terminals that appear to support 256 colors.
@@ -841,10 +842,23 @@ func actualEntryName(parent, requested string, requestedInfo fs.FileInfo) (strin
 }
 
 func executeRenamePlans(plans []renamePlan, opts options) (summary, error) {
-	return executeRenamePlansWith(plans, opts, renameNoReplace)
+	return executeRenamePlansWith(plans, opts, renameBestEffortNoReplace)
 }
 
 type renameFunc func(string, string) error
+
+func renameBestEffortNoReplace(oldPath, newPath string) error {
+	if _, err := os.Lstat(newPath); err == nil {
+		return &os.LinkError{Op: "rename", Old: oldPath, New: newPath, Err: os.ErrExist}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	// Ordinary rename is supported by filesystems that do not implement the
+	// platform-specific atomic no-replace operation. The preceding check catches
+	// normal conflicts, but another process can still create the target here.
+	return os.Rename(oldPath, newPath)
+}
 
 type completedMove struct {
 	from string

@@ -12,7 +12,8 @@ rr --help-long
 Important behavior:
 
 - `rr` builds the full rename plan first and checks for conflicts before changing anything
-- targets are never overwritten, including targets created after the plan was checked
+- targets are checked before the batch and immediately before each rename; a
+  target created concurrently between the final check and rename may be overwritten
 - if applying a batch fails, completed renames are rolled back when possible; abrupt process or system termination can still leave a partially applied batch
 - transforms and interactive edits change only basenames; `rr` does not move an item to another directory
 - transform flags run in the order you pass them

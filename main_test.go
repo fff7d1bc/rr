@@ -864,7 +864,46 @@ func TestExecuteRenamePlansSwapsFiles(t *testing.T) {
 	}
 }
 
-func TestRenameNoReplacePreservesExistingTarget(t *testing.T) {
+func TestExecuteRenamePlansMovesIntoVacatedSource(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	foo := filepath.Join(dir, "foo")
+	bar := filepath.Join(dir, "bar")
+	baz := filepath.Join(dir, "baz")
+	if err := os.WriteFile(foo, []byte("foo"), 0o644); err != nil {
+		t.Fatalf("WriteFile foo: %v", err)
+	}
+	if err := os.WriteFile(baz, []byte("baz"), 0o644); err != nil {
+		t.Fatalf("WriteFile baz: %v", err)
+	}
+
+	result, err := executeRenamePlans([]renamePlan{
+		{oldPath: foo, newPath: bar},
+		{oldPath: baz, newPath: foo},
+	}, options{})
+	if err != nil {
+		t.Fatalf("executeRenamePlans: %v", err)
+	}
+	if result.renamed != 2 {
+		t.Fatalf("executeRenamePlans summary = %+v", result)
+	}
+
+	for path, want := range map[string]string{bar: "foo", foo: "baz"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%q): %v", path, err)
+		}
+		if string(data) != want {
+			t.Fatalf("ReadFile(%q) = %q, want %q", path, data, want)
+		}
+	}
+	if _, err := os.Lstat(baz); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("baz still exists after rename: %v", err)
+	}
+}
+
+func TestBestEffortRenamePreservesExistingTarget(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -877,8 +916,8 @@ func TestRenameNoReplacePreservesExistingTarget(t *testing.T) {
 		t.Fatalf("WriteFile target: %v", err)
 	}
 
-	if err := renameNoReplace(source, target); err == nil {
-		t.Fatal("renameNoReplace succeeded with an existing target")
+	if err := renameBestEffortNoReplace(source, target); err == nil {
+		t.Fatal("renameBestEffortNoReplace succeeded with an existing target")
 	}
 	for path, want := range map[string]string{source: "source", target: "target"} {
 		data, err := os.ReadFile(path)
@@ -888,6 +927,58 @@ func TestRenameNoReplacePreservesExistingTarget(t *testing.T) {
 		if string(data) != want {
 			t.Fatalf("ReadFile(%q) = %q, want %q", path, data, want)
 		}
+	}
+}
+
+func TestExecuteRenamePlansRejectsTargetCreatedImmediatelyBeforeMove(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	one := filepath.Join(dir, "one")
+	two := filepath.Join(dir, "two")
+	oneTarget := filepath.Join(dir, "one-new")
+	twoTarget := filepath.Join(dir, "two-new")
+	for path, data := range map[string]string{one: "one", two: "two"} {
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q): %v", path, err)
+		}
+	}
+
+	calls := 0
+	move := func(oldPath, newPath string) error {
+		calls++
+		if calls == 2 {
+			if err := os.WriteFile(newPath, []byte("concurrent"), 0o644); err != nil {
+				return err
+			}
+		}
+		return renameBestEffortNoReplace(oldPath, newPath)
+	}
+	result, err := executeRenamePlansWith(
+		[]renamePlan{
+			{oldPath: one, newPath: oneTarget},
+			{oldPath: two, newPath: twoTarget},
+		},
+		options{},
+		move,
+	)
+	if err == nil {
+		t.Fatal("executeRenamePlansWith succeeded after target appeared")
+	}
+	if result.renamed != 0 || !strings.Contains(err.Error(), "target exists") || !strings.Contains(err.Error(), "rolled back") {
+		t.Fatalf("executeRenamePlansWith result=%+v err=%v", result, err)
+	}
+	for path, want := range map[string]string{one: "one", two: "two", twoTarget: "concurrent"} {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("ReadFile(%q): %v", path, readErr)
+		}
+		if string(data) != want {
+			t.Fatalf("ReadFile(%q) = %q, want %q", path, data, want)
+		}
+	}
+	if _, statErr := os.Lstat(oneTarget); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("first target remains after rollback: %v", statErr)
 	}
 }
 
@@ -946,7 +1037,7 @@ func TestExecuteRenamePlansRollsBackCompletedMoves(t *testing.T) {
 		if calls == 2 {
 			return injected
 		}
-		return renameNoReplace(oldPath, newPath)
+		return renameBestEffortNoReplace(oldPath, newPath)
 	}
 	result, err := executeRenamePlansWith([]renamePlan{
 		{oldPath: one, newPath: filepath.Join(dir, "one-new")},
@@ -992,7 +1083,7 @@ func TestExecuteRenamePlansReportsRollbackFailure(t *testing.T) {
 		if calls == 3 {
 			return errors.New("rollback failure")
 		}
-		return renameNoReplace(oldPath, newPath)
+		return renameBestEffortNoReplace(oldPath, newPath)
 	}
 	_, err := executeRenamePlansWith([]renamePlan{
 		{oldPath: one, newPath: filepath.Join(dir, "one-new")},
